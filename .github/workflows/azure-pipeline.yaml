@@ -5,7 +5,7 @@ on:
     branches:
       - master
   workflow_dispatch:
-    
+
 
 jobs:
   build:
@@ -20,5 +20,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
+      - name: Run Pyhton script
+        run: |
+          python src/azuremlapp/utils/fraud_train.py
+
+      - name: Check Pickle File Exists(Model file)
+        run: |
+          if [ -f "outputs/fraud_detection_model.pkl" ]; then
+            echo "Model file exists."
+          else
+            echo "Model file does not exist."
+            exit 1
+          fi
+      - name: Test Score
+        run: |
+          python src/azuremlapp/utils/score.py
      
 
