@@ -171,5 +171,63 @@ jobs:
               --set defaults.deployment_name=$TEST_BATCH_DEPLOYMENT \
               --resource-group $RESOURCE_GROUP \
               --workspace-name $WORKSPACE_NAME
+      - name: Create Batch Input CSV
+        run: |
+          mkdir -p fraud-batch-input
+          cat > fraud-batch-input/fraud_input.csv <<EOF
+          transaction_id,amount,hour,merchant_category,location,label
+          TXN0035,22553,23,Retail,Delhi,0
+          TXN0036,33067,4,Healthcare,Kochi,0
+          TXN0037,167721,3,Retail,Bengaluru,1
+          TXN0038,64296,7,Retail,Delhi,0
+          EOF
+
+      - name: Upload Batch Input Data
+        id: testdata
+        run: |
+          DATA_VERSION=$(az ml data create \
+            --name fraud-test-batch-input \
+            --type uri_folder \
+            --path fraud-batch-input/ \
+            --query version \
+            --output tsv \
+            --resource-group $RESOURCE_GROUP \
+            --workspace-name $WORKSPACE_NAME)
+
+          echo "Uploaded data version: $DATA_VERSION"
+          echo "data_version=$DATA_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check Test Batch Endpoint
+        run: |
+          az ml batch-endpoint show \
+            --name $TEST_BATCH_ENDPOINT \
+            --resource-group $RESOURCE_GROUP \
+            --workspace-name $WORKSPACE_NAME \
+            --output table
+
+      - name: Invoke Test Batch Endpoint with Retry
+        run: |
+          for i in 1 2 3; do
+            echo "Invoke attempt $i"
+
+            az ml batch-endpoint invoke \
+              --name $TEST_BATCH_ENDPOINT \
+              --input azureml:fraud-test-batch-input:${{ steps.testdata.outputs.data_version }} \
+              --resource-group $RESOURCE_GROUP \
+              --workspace-name $WORKSPACE_NAME && break
+
+            echo "Retrying after 30 seconds..."
+            sleep 30
+          done
+
+  monitor-model:
+    needs: deploy-test-batch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Monitoring Placeholder
+        run: |
+          echo "Batch endpoint deployment completed"
+          echo "Check batch job output, logs, failures, and predictions" 
 
       
