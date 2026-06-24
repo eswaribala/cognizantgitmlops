@@ -1,39 +1,175 @@
-#configure workflow when code is pushed to the master branch
-name: Azure Pipeline
+name: Fraud detection Azure ML Batch MLOps Pipeline
+
 on:
   push:
     branches:
       - master
   workflow_dispatch:
 
+env:
+  RESOURCE_GROUP: training_group
+  WORKSPACE_NAME: training-ws
+  MODEL_NAME: fraud-detection-model
+
+  TEST_BATCH_ENDPOINT: fraud-test-batch-endpoint
+  TEST_BATCH_DEPLOYMENT: blue
+
+  COMPUTE_NAME: cpu-cluster
 
 jobs:
-  build:
+  train-model:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
-      - name: Install dependencies
+          python-version: "3.11"
+
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-      - name: Run Python script
+          pip install pandas scikit-learn==1.7.2 joblib python-dotenv
+
+      - name: Train Model
         run: |
           python src/azuremlapp/utils/fraud_train.py
 
-      - name: Check Pickle File Exists(Model file)
+      - name: Verify Model Output
         run: |
-          if [ -f "outputs/fraud_detection_model.pkl" ]; then
-            echo "Model file exists."
-          else
-            echo "Model file does not exist."
-            exit 1
-          fi
-      - name: Test Score
-        run: |
-          python src/azuremlapp/utils/score.py
-     
+          ls -R outputs
+          test -f outputs/fraud_detection_model.pkl
 
+      - name: Upload Model Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraud-model
+          path: outputs/
+
+  evaluate-model:
+    needs: train-model
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Model Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fraud-model
+          path: outputs/
+
+      - name: Validate Model
+        run: |
+          test -f outputs/fraud_detection_model.pkl
+          echo "Model validation passed"
+
+  register-model:
+    needs: evaluate-model
+    runs-on: ubuntu-latest
+
+    outputs:
+      model_version: ${{ steps.register.outputs.model_version }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Model Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fraud-model
+          path: outputs/
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Azure ML Extension
+        run: |
+          az extension add -n ml --yes
+          az extension update -n ml
+          az configure --defaults group=$RESOURCE_GROUP workspace=$WORKSPACE_NAME
+
+      - name: Register Model
+        id: register
+        run: |
+          MODEL_VERSION=$(az ml model create \
+            --name $MODEL_NAME \
+            --type custom_model \
+            --path outputs/fraud_detection_model.pkl \
+            --query version \
+            --output tsv)
+
+          echo "Registered model version: $MODEL_VERSION"
+          echo "model_version=$MODEL_VERSION" >> $GITHUB_OUTPUT
+
+  deploy-test-batch:
+    needs: register-model
+    runs-on: ubuntu-latest
+    environment: test
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Azure ML Extension
+        run: |
+          az extension add -n ml --yes
+          az extension update -n ml
+          az configure --defaults group=$RESOURCE_GROUP workspace=$WORKSPACE_NAME
+
+      - name: Show Files
+        run: |
+          pwd
+          ls -la
+          ls -la src/azuremlapp/utils
+          cat batch-deployment.yml
+
+      - name: Create Test Batch Endpoint If Not Exists
+        run: |
+          az ml batch-endpoint show \
+            --name $TEST_BATCH_ENDPOINT \
+            --resource-group $RESOURCE_GROUP \
+            --workspace-name $WORKSPACE_NAME || \
+          az ml batch-endpoint create \
+            --name $TEST_BATCH_ENDPOINT \
+            --resource-group $RESOURCE_GROUP \
+            --workspace-name $WORKSPACE_NAME
+
+      - name: Create or Update Batch Deployment
+        run: |
+          az ml batch-deployment create \
+            --file batch-deployment.yml \
+            --set model=azureml:$MODEL_NAME:${{ needs.register-model.outputs.model_version }} \
+            --set name=$TEST_BATCH_DEPLOYMENT \
+            --set endpoint_name=$TEST_BATCH_ENDPOINT \
+            --resource-group $RESOURCE_GROUP \
+            --workspace-name $WORKSPACE_NAME || \
+          az ml batch-deployment update \
+            --file batch-deployment.yml \
+            --set model=azureml:$MODEL_NAME:${{ needs.register-model.outputs.model_version }} \
+            --set name=$TEST_BATCH_DEPLOYMENT \
+            --set endpoint_name=$TEST_BATCH_ENDPOINT \
+            --resource-group $RESOURCE_GROUP \
+            --workspace-name $WORKSPACE_NAME
+
+      - name: Set Default Batch Deployment
+        run: |
+            az ml batch-endpoint update \
+              --name $TEST_BATCH_ENDPOINT \
+              --set defaults.deployment_name=$TEST_BATCH_DEPLOYMENT \
+              --resource-group $RESOURCE_GROUP \
+              --workspace-name $WORKSPACE_NAME
+
+      

@@ -1,0 +1,23 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
+
+name: blue
+endpoint_name: fraud-test-batch-endpoint
+
+model: azureml:fraud-detection-model@latest
+
+code_configuration:
+  code: ./src/azuremlapp/utils
+  scoring_script: score.py
+
+environment:
+  conda_file: conda.yml
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04
+
+compute: azureml:cpu-cluster
+
+resources:
+  instance_count: 1
+
+max_concurrency_per_instance: 1
+mini_batch_size: 1
+output_action: append_row
